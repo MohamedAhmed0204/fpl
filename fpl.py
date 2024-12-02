@@ -41,7 +41,8 @@ def fetch_fixtures():
 fixtures = fetch_fixtures()
 
 # App title
-st.title("FPL Dashboard")
+st.title("FPL Insights Dashboard")
+st.subheader("Visual by FrasierFPL @frasierfpl.bsky.social")
 
 # Sidebar filters
 st.sidebar.header("Filters")
@@ -56,6 +57,11 @@ filtered_players = players[
     (players['price_m'] <= max_price)
 ]
 
+# Ensure filtered_players is not empty
+if filtered_players.empty:
+    st.warning("No players match the current filters. Displaying all players instead.")
+    filtered_players = players.copy()
+
 # Ensure required columns are numeric
 numeric_columns = ['ict_index', 'points_per_game', 'form', 'points_per_million']
 for col in numeric_columns:
@@ -65,7 +71,7 @@ for col in numeric_columns:
         filtered_players[col] = 0  # Add column with default value
 
 # Tabs for insights
-tabs = st.tabs(["Captain Picks", "Differential Players", "Set-Piece Takers", "Value Picks", "Form vs Fixture Difficulty", "Fixture Difficulty Heatmap"])
+tabs = st.tabs(["Captain Picks", "Differential Players", "Set-Piece Takers", "Value Picks", "Form vs Fixture Difficulty", "Team Rating"])
 
 # Tab 1: Captain Picks
 with tabs[0]:
@@ -140,7 +146,6 @@ with tabs[3]:
 # Tab 5: Form vs Fixture Difficulty
 with tabs[4]:
     st.subheader("Form vs Fixture Difficulty")
-    
     filtered_players['fixture_difficulty'] = filtered_players.apply(
         lambda x: (x['strength_attack_home'] + x['strength_defence_away']) / 2 if pd.notnull(x['strength_attack_home']) else 0, axis=1
     )
@@ -158,37 +163,81 @@ with tabs[4]:
     )
     st.plotly_chart(fig)
 
-# Tab 6: Fixture Difficulty Heatmap
-#with tabs[5]:
-    #st.subheader("Fixture Difficulty Heatmap")
+# Tab 6: Team Ratings
+with tabs[5]:
+    st.subheader("Premier League Team Ratings")
 
-    #def calculate_position_fdr(team, position):
-        #team_fixtures = fixtures[(fixtures['team_h'] == team) | (fixtures['team_a'] == team)].head(5)
-        #if not team_fixtures.empty:
-            #if position in ['Defender', 'Goalkeeper']:
-                #fdr = team_fixtures.apply(
-                    #lambda row: row['difficulty_h'] if row['team_a'] == team else row['difficulty_a'], axis=1
-                #)
-            #elif position in ['Midfielder', 'Forward']:
-                #fdr = team_fixtures.apply(
-                    #lambda row: row['difficulty_a'] if row['team_a'] == team else row['difficulty_h'], axis=1
-                #)
-            #else:
-                #fdr = pd.Series([0])
-        #else:
-            #fdr = pd.Series([0])
-        #return fdr.mean()
+    # Process completed fixtures to calculate goals scored and conceded
+    completed_fixtures = fixtures[fixtures['finished'] == True]
 
-    #filtered_players['fixture_difficulty'] = filtered_players.apply(
-        #lambda x: calculate_position_fdr(x['team_name'], x['position']), axis=1
-    #)
-    #heatmap_data = filtered_players.pivot_table(
-        #index='team_name',
-        #columns='position',
-        #values='fixture_difficulty',
-        #aggfunc='mean'
-    #).fillna(0)
-    #st.dataframe(heatmap_data.style.background_gradient(cmap="coolwarm"))
+    # Home stats
+    home_stats = completed_fixtures[['team_h', 'team_h_score']].copy()
+    home_stats.rename(columns={'team_h': 'team', 'team_h_score': 'goals_scored'}, inplace=True)
+    home_stats['goals_conceded'] = completed_fixtures['team_a_score']
+
+    # Away stats
+    away_stats = completed_fixtures[['team_a', 'team_a_score']].copy()
+    away_stats.rename(columns={'team_a': 'team', 'team_a_score': 'goals_scored'}, inplace=True)
+    away_stats['goals_conceded'] = completed_fixtures['team_h_score']
+
+    # Combine home and away stats
+    all_stats = pd.concat([home_stats, away_stats])
+
+    # Aggregate goals scored and conceded for each team
+    team_goals = all_stats.groupby('team').sum().reset_index()
+
+    # Map team IDs to team names
+    team_id_name_mapping = teams[['id', 'name']].copy()
+    team_id_name_mapping.rename(columns={'id': 'team', 'name': 'Team'}, inplace=True)
+    team_goals = team_goals.merge(team_id_name_mapping, on='team', how='left')
+
+    # Calculate goal difference (GD)
+    team_goals['GD'] = team_goals['goals_scored'] - team_goals['goals_conceded']
+
+    # Calculate Attack, Defence, and Overall using FPL API metrics
+    team_ratings = teams.copy()
+    team_ratings['Attack'] = ((team_ratings['strength_attack_home'] + team_ratings['strength_attack_away']) / 200).round(0).astype(int)  # Normalize and round
+    team_ratings['Defence'] = ((team_ratings['strength_defence_home'] + team_ratings['strength_defence_away']) / 200).round(0).astype(int)  # Normalize and round
+    team_ratings['Overall'] = team_ratings['Attack'] - team_ratings['Defence']
+
+    # Merge goals data
+    team_ratings = team_ratings.merge(team_goals[['Team', 'goals_scored', 'goals_conceded', 'GD']], left_on='name', right_on='Team', how='left')
+
+    # Select and rename columns for display
+    team_ratings_display = team_ratings[['Team', 'Attack', 'Defence', 'Overall', 'goals_scored', 'goals_conceded', 'GD']].copy()
+    team_ratings_display.rename(columns={
+        'Attack': 'Attack Rating',
+        'Defence': 'Defence Rating',
+        'Overall': 'Overall Rating',
+        'goals_scored': 'Goals Scored',
+        'goals_conceded': 'Goals Conceded',
+        'GD': 'Goal Difference'
+    }, inplace=True)
+
+    # Sort by Goal Difference or Overall Rating
+    team_ratings_display.sort_values(by='Goal Difference', ascending=False, inplace=True)
+
+    # Reset index for proper ranking (1 to 20)
+    team_ratings_display.reset_index(drop=True, inplace=True)
+    team_ratings_display.index = team_ratings_display.index + 1  # Start from 1
+
+    # Remove decimals for all numeric columns
+    for col in ['Attack Rating', 'Defence Rating', 'Overall Rating', 'Goals Scored', 'Goals Conceded', 'Goal Difference']:
+        team_ratings_display[col] = team_ratings_display[col].astype(int)
+
+    # Apply color gradient to the DataFrame
+    styled_table = (
+        team_ratings_display.style
+        .background_gradient(subset=['Attack Rating', 'Defence Rating', 'Overall Rating', 'Goals Scored', 'Goals Conceded', 'Goal Difference'], cmap='Blues')
+        .set_table_styles([
+            {'selector': 'th', 'props': [('font-size', '16px'), ('text-align', 'center'), ('font-weight', 'bold')]},
+            {'selector': 'td', 'props': [('font-size', '14px'), ('text-align', 'center')]}
+        ])
+    )
+
+    # Display styled table
+    st.write(styled_table.to_html(), unsafe_allow_html=True)
+
 
 
 
