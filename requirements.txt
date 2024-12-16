@@ -2,3 +2,5 @@ streamlit
 pandas
 requests
 plotly==5.20.0
+matplotlib
+
