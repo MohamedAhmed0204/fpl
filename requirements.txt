@@ -1,4 +1,4 @@
 streamlit
 pandas
 requests
-plotly
+plotly==5.20.0
